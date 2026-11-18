@@ -1,7 +1,7 @@
 #pragma TextEncoding = "UTF-8"
 #pragma rtGlobals = 3
 #pragma IgorVersion = 8.00
-#pragma version = 1.00
+#pragma version = 1.10
 
 // ============================================================================
 //  AichiSR_BL5S2_XRD.ipf
@@ -10,11 +10,13 @@
 //  メニュー "AichiSR" から起動:
 //    XRD Profile Viewer         ... フォルダ内の XRD テキストを一覧し、選択したものを色分けして重ね描き
 //    XRD 2D Map (temperature)   ... 温度変化などの連続測定を 2D マップ (image) と
-//                                   縦オフセット付きプロファイル (stack) で表示
+//                                   縦オフセット付きプロファイル (stack) で表示。
+//                                   温度ログを読み込めば縦軸を実測温度にできる
 //
 //  対応フォーマット:
 //    "#" で始まるヘッダ行 + タブ区切り 3 列 (2θ, 強度, 標準偏差), UTF-8
 //    ファイル名  <YYYYMMDDhhmmss>-<試料名>-<連番>.txt   (*_Log.txt は無視)
+//    温度ログ    "#" で始まるヘッダ行 + タブ区切り 2 列 (XRD のファイル名, 平均温度)
 //
 //  データの置き場所:
 //    root:AichiXRD:profiles:<名前>       強度 (2θ が等間隔なら X スケーリング付き)
@@ -22,6 +24,7 @@
 //    root:AichiXRD:profiles:<名前>_esd   標準偏差
 //    root:AichiXRD:map:xrdMap            2D マップ (行 = 2θ, 列 = スキャン)
 //    root:AichiXRD:map:T_user            温度を手入力するためのウェーブ
+//    root:AichiXRD:map:T_file            温度ログから引いた各スキャンの温度
 //
 //  グラフの体裁 (プロファイル):
 //    倍率 2 倍 / フォント 12 pt / 軸ラベル 16 pt / tick 内向き / 縦軸は axis only /
@@ -74,7 +77,8 @@ Function AXRD_Init()
 	AXRD_DefStr(dfM, "gSeries", "")
 	AXRD_DefStr(dfM, "gSeriesList", kAXRD_AllSeries + ";")
 	AXRD_DefStr(dfM, "gStatus", "")
-	AXRD_DefVar(dfM, "gYMode", 1)		// 1 scan number, 2 elapsed time, 3 T linear, 4 T table
+	AXRD_DefVar(dfM, "gYMode", 1)		// 1 scan number, 2 elapsed time, 3 T linear, 4 T table, 5 T file
+	AXRD_DefStr(dfM, "gTFileDisp", "(no temperature file)")
 	AXRD_DefVar(dfM, "gT0", 300)
 	AXRD_DefVar(dfM, "gTStep", 10)
 	AXRD_DefVar(dfM, "gTUnit", 1)		// 1 K, 2 degC
@@ -713,6 +717,7 @@ Function AXRD_Map()
 	DFREF df = AXRD_ToolDF("Map")
 	SVAR gFolderDisp = df:gFolderDisp
 	SVAR gStatus = df:gStatus
+	SVAR gTFileDisp = df:gTFileDisp
 	SVAR gCtabImg = df:gCtabImg
 	SVAR gCtabStk = df:gCtabStk
 	NVAR gYMode = df:gYMode
@@ -737,7 +742,7 @@ Function AXRD_Map()
 	Display/K=1/N=$g/W=(winL, 70, winL + 360, 70 + 320) as "BL5S2 XRD - 2D Map"
 	ModifyGraph/W=$g expand=2
 
-	NewPanel/HOST=$g/EXT=1/N=ctrl/W=(kAXRD_PanelW, 636, 0, 0) as "2D map controls"
+	NewPanel/HOST=$g/EXT=1/N=ctrl/W=(kAXRD_PanelW, 664, 0, 0) as "2D map controls"
 	String pn = g + "#ctrl"
 
 	Button btnOpen, win=$pn, pos={8, 6}, size={110, 22}, title="Open Folder...", proc=AXRD_MButtonProc
@@ -750,40 +755,43 @@ Function AXRD_Map()
 	Button btnNone, win=$pn, pos={62, 254}, size={50, 22}, title="None", proc=AXRD_MButtonProc
 	Button btnBuild, win=$pn, pos={172, 254}, size={120, 22}, title="Build Map", fStyle=1, proc=AXRD_MButtonProc
 
-	GroupBox gbY, win=$pn, pos={4, 284}, size={292, 78}, title="Y axis"
+	GroupBox gbY, win=$pn, pos={4, 284}, size={292, 106}, title="Y axis"
 	PopupMenu popYMode, win=$pn, pos={12, 302}, size={200, 20}, bodyWidth=200, proc=AXRD_MPopupProc
-	PopupMenu popYMode, win=$pn, value="Scan number;Elapsed time / min;Temperature (start + step);Temperature (table)", mode=gYMode
+	PopupMenu popYMode, win=$pn, value="Scan number;Elapsed time / min;Temperature (start + step);Temperature (table);Temperature (file)", mode=gYMode
 	PopupMenu popUnit, win=$pn, pos={222, 302}, size={66, 20}, bodyWidth=66, proc=AXRD_MPopupProc
 	PopupMenu popUnit, win=$pn, value="K;°C", mode=gTUnit
 	SetVariable svT0, win=$pn, pos={12, 332}, size={92, 18}, bodyWidth=56, title="Start", value=gT0, proc=AXRD_MSetVarProc
 	SetVariable svTStep, win=$pn, pos={110, 332}, size={86, 18}, bodyWidth=56, title="Step", value=gTStep, proc=AXRD_MSetVarProc
 	Button btnEditT, win=$pn, pos={206, 330}, size={84, 22}, title="Edit table...", proc=AXRD_MButtonProc
+	Button btnLoadT, win=$pn, pos={12, 358}, size={100, 22}, title="Load T file...", proc=AXRD_MButtonProc
+	Button btnLoadT, win=$pn, help={"Load a temperature log: one line per scan, XRD file name <tab> mean temperature."}
+	TitleBox tbTFile, win=$pn, pos={120, 361}, size={170, 16}, fixedSize=1, frame=0, variable=gTFileDisp
 
-	SetVariable svX1, win=$pn, pos={8, 372}, size={118, 18}, bodyWidth=60, title="2θ from", value=gX1, proc=AXRD_MSetVarProc
-	SetVariable svX2, win=$pn, pos={132, 372}, size={84, 18}, bodyWidth=60, title="to", value=gX2, proc=AXRD_MSetVarProc
-	Button btnFullX, win=$pn, pos={226, 370}, size={66, 22}, title="Full", proc=AXRD_MButtonProc
+	SetVariable svX1, win=$pn, pos={8, 400}, size={118, 18}, bodyWidth=60, title="2θ from", value=gX1, proc=AXRD_MSetVarProc
+	SetVariable svX2, win=$pn, pos={132, 400}, size={84, 18}, bodyWidth=60, title="to", value=gX2, proc=AXRD_MSetVarProc
+	Button btnFullX, win=$pn, pos={226, 398}, size={66, 22}, title="Full", proc=AXRD_MButtonProc
 
-	GroupBox gbImg, win=$pn, pos={4, 400}, size={292, 96}, title="Image"
-	PopupMenu popCtabImg, win=$pn, pos={12, 418}, size={200, 20}, bodyWidth=150, title="Colors", proc=AXRD_MPopupProc
+	GroupBox gbImg, win=$pn, pos={4, 428}, size={292, 96}, title="Image"
+	PopupMenu popCtabImg, win=$pn, pos={12, 446}, size={200, 20}, bodyWidth=150, title="Colors", proc=AXRD_MPopupProc
 	PopupMenu popCtabImg, win=$pn, value="*COLORTABLEPOP*", mode=AXRD_CtabPopMode(gCtabImg)
-	CheckBox cbRevImg, win=$pn, pos={220, 421}, size={70, 16}, title="Reverse", variable=gRevImg, proc=AXRD_MCheckProc
-	CheckBox cbLogImg, win=$pn, pos={12, 446}, size={100, 16}, title="Log colors", variable=gLogImg, proc=AXRD_MCheckProc
-	CheckBox cbZAuto, win=$pn, pos={150, 446}, size={100, 16}, title="Auto Z range", variable=gZAuto, proc=AXRD_MCheckProc
-	SetVariable svZMin, win=$pn, pos={12, 470}, size={132, 18}, bodyWidth=90, title="Z min", value=gZMin, proc=AXRD_MSetVarProc
-	SetVariable svZMax, win=$pn, pos={152, 470}, size={136, 18}, bodyWidth=90, title="Z max", value=gZMax, proc=AXRD_MSetVarProc
+	CheckBox cbRevImg, win=$pn, pos={220, 449}, size={70, 16}, title="Reverse", variable=gRevImg, proc=AXRD_MCheckProc
+	CheckBox cbLogImg, win=$pn, pos={12, 474}, size={100, 16}, title="Log colors", variable=gLogImg, proc=AXRD_MCheckProc
+	CheckBox cbZAuto, win=$pn, pos={150, 474}, size={100, 16}, title="Auto Z range", variable=gZAuto, proc=AXRD_MCheckProc
+	SetVariable svZMin, win=$pn, pos={12, 498}, size={132, 18}, bodyWidth=90, title="Z min", value=gZMin, proc=AXRD_MSetVarProc
+	SetVariable svZMax, win=$pn, pos={152, 498}, size={136, 18}, bodyWidth=90, title="Z max", value=gZMax, proc=AXRD_MSetVarProc
 
-	GroupBox gbStk, win=$pn, pos={4, 504}, size={292, 96}, title="Stacked profiles"
-	PopupMenu popCtabStk, win=$pn, pos={12, 522}, size={200, 20}, bodyWidth=150, title="Colors", proc=AXRD_MPopupProc
+	GroupBox gbStk, win=$pn, pos={4, 532}, size={292, 96}, title="Stacked profiles"
+	PopupMenu popCtabStk, win=$pn, pos={12, 550}, size={200, 20}, bodyWidth=150, title="Colors", proc=AXRD_MPopupProc
 	PopupMenu popCtabStk, win=$pn, value="*COLORTABLEPOP*", mode=AXRD_CtabPopMode(gCtabStk)
-	CheckBox cbRevStk, win=$pn, pos={220, 525}, size={70, 16}, title="Reverse", variable=gRevStk, proc=AXRD_MCheckProc
-	SetVariable svOffset, win=$pn, pos={12, 550}, size={146, 18}, bodyWidth=66, title="Offset / %", value=gOffsetPct, proc=AXRD_MSetVarProc
+	CheckBox cbRevStk, win=$pn, pos={220, 553}, size={70, 16}, title="Reverse", variable=gRevStk, proc=AXRD_MCheckProc
+	SetVariable svOffset, win=$pn, pos={12, 578}, size={146, 18}, bodyWidth=66, title="Offset / %", value=gOffsetPct, proc=AXRD_MSetVarProc
 	SetVariable svOffset, win=$pn, limits={-1000, 1000, 1}, help={"Vertical offset between neighbouring profiles, in % of the largest intensity."}
-	SetVariable svEvery, win=$pn, pos={170, 550}, size={118, 18}, bodyWidth=50, title="Every N", value=gEvery, proc=AXRD_MSetVarProc
+	SetVariable svEvery, win=$pn, pos={170, 578}, size={118, 18}, bodyWidth=50, title="Every N", value=gEvery, proc=AXRD_MSetVarProc
 	SetVariable svEvery, win=$pn, limits={1, 1000, 1}
-	CheckBox cbLabels, win=$pn, pos={12, 576}, size={120, 16}, title="Label profiles", variable=gLabels, proc=AXRD_MCheckProc
-	Button btnStack, win=$pn, pos={172, 573}, size={116, 22}, title="Show profiles", proc=AXRD_MButtonProc
+	CheckBox cbLabels, win=$pn, pos={12, 604}, size={120, 16}, title="Label profiles", variable=gLabels, proc=AXRD_MCheckProc
+	Button btnStack, win=$pn, pos={172, 601}, size={116, 22}, title="Show profiles", proc=AXRD_MButtonProc
 
-	TitleBox tbStatus, win=$pn, pos={8, 610}, size={284, 16}, fixedSize=1, frame=0, variable=gStatus
+	TitleBox tbStatus, win=$pn, pos={8, 638}, size={284, 16}, fixedSize=1, frame=0, variable=gStatus
 
 	SetActiveSubwindow $g
 	AXRD_MapSyncSeriesPopup()
@@ -1035,13 +1043,16 @@ Function AXRD_MapBuild()
 	if (!keepT)
 		Make/O/D/N=(ns) mapDF:T_user = NaN
 	endif
+	AXRD_MapFillTFile()
 
 	sprintf gStatus, "Map built: %d scans x %d points.", ns, nx
 	AXRD_MapRefresh(1, 1)
 	return 0
 End
 
-// Y 軸の値 (scanY) と image 用の境界 (scanYEdge) を作る
+// Y 軸の値 (scanY) と image 用の境界 (scanYEdge) を作る。
+// Y が単調なら 1 を返す。単調でなければ 0 を返し、image をスキャン順に描くための
+// 目盛りウェーブ (yTickPos, yTickLab) を用意する。
 Function AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 	String &yLab, &imgYLab, &tagFmt
 	DFREF df = AXRD_ToolDF("Map")
@@ -1082,6 +1093,13 @@ Function AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 			yLab = "Temperature / " + unit
 			tagFmt = "%g " + unit
 			break
+		case 5:
+			AXRD_MapFillTFile()
+			Wave T_file = mapDF:T_file
+			sy = T_file[p]
+			yLab = "Temperature / " + unit
+			tagFmt = "%g " + unit
+			break
 		default:
 			sy = scanNum[p]
 			yLab = "Scan number"
@@ -1092,12 +1110,16 @@ Function AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 	WaveStats/Q/M=1 sy
 	if (V_numNaNs + V_numINFs > 0)
 		gStatus = "Y values are missing; scan index is used."
+		if (gYMode == 5)
+			gStatus = "Y is missing in the T file; scan index is used."
+		endif
 		sy = p + 1
 		yLab = "Scan index"
 		tagFmt = "#%g"
 	endif
 
-	// image の Y は単調でないと描けない (昇温→降温など) ので、その場合は連番にする
+	// image の Y は単調でないと描けない (昇温→保持→降温など)。その場合はスキャン順に並べ、
+	// 目盛りにだけ Y の値 (温度など) を書く
 	Variable mono = 1, j, d, s0 = 0
 	for (j = 1; j < ns; j += 1)
 		d = sy[j] - sy[j - 1]
@@ -1115,8 +1137,9 @@ Function AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 		imgYLab = yLab
 	else
 		src = p + 1
-		imgYLab = "Scan index"
-		gStatus = "Y is not monotonic; the image uses scan index."
+		imgYLab = yLab
+		AXRD_MapMakeYTicks(sy)
+		gStatus = "Y is not monotonic; the image is in scan order."
 	endif
 	if (ns == 1)
 		se[0] = src[0] - 0.5
@@ -1127,6 +1150,252 @@ Function AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 		se[ns] = src[ns - 1] + (src[ns - 1] - src[ns - 2]) / 2
 	endif
 	return mono
+End
+
+// 目盛りの刻みに使う、きりのよい数 (1, 2, 5 × 10^n) のうち raw 以上で最小のもの
+Function AXRD_NiceStep(raw)
+	Variable raw
+	if (!(raw > 0) || numtype(raw) != 0)
+		return 1
+	endif
+	Variable mag = 10 ^ floor(log(raw))
+	Variable f = raw / mag
+	if (f <= 1)
+		return mag
+	elseif (f <= 2)
+		return 2 * mag
+	elseif (f <= 5)
+		return 5 * mag
+	endif
+	return 10 * mag
+End
+
+// 既にある目盛りから tickGap 以上離れていれば、位置 yPos に値 val の目盛りを足す
+Function AXRD_AddYTick(tp, tl, yPos, val, dec, tickGap)
+	Wave tp
+	Wave/T tl
+	Variable yPos, val, dec, tickGap
+	Variable i, n = numpnts(tp)
+	for (i = 0; i < n; i += 1)
+		if (abs(tp[i] - yPos) < tickGap)
+			return 0
+		endif
+	endfor
+	Variable sc = 10 ^ dec
+	val = round(val * sc) / sc
+	if (val == 0)
+		val = 0		// "-0" と書かない
+	endif
+	String fmt = "%." + num2istr(dec) + "f"
+	String txt
+	sprintf txt, fmt, val
+	Redimension/N=(n + 1) tp, tl
+	tp[n] = yPos
+	tl[n] = txt
+	return 1
+End
+
+// Y が単調でないとき用の目盛り。image はスキャン順 (j 番目のスキャンが y = j + 1) に描き、
+// 左軸には次の位置に Y の値を書く。文字が重なるほど近いものは省く (先に置いたものが優先)。
+//   1) 最初・最後のスキャンと、最大・最小のスキャン (その値)
+//   2) きりのよい値をまたぐ位置 (隣り合うスキャンの間を線形補間)
+Function AXRD_MapMakeYTicks(sy)
+	Wave sy
+	DFREF mapDF = $kAXRD_MapDF
+	Make/O/D/N=0 mapDF:yTickPos
+	Make/O/T/N=0 mapDF:yTickLab
+	Wave tp = mapDF:yTickPos
+	Wave/T tl = mapDF:yTickLab
+	Variable ns = numpnts(sy)
+	if (ns < 1)
+		return 0
+	endif
+
+	Variable j, jMin = 0, jMax = 0
+	for (j = 1; j < ns; j += 1)
+		if (sy[j] < sy[jMin])
+			jMin = j
+		endif
+		if (sy[j] > sy[jMax])
+			jMax = j
+		endif
+	endfor
+	Variable tStep = AXRD_NiceStep((sy[jMax] - sy[jMin]) / 6)
+	Variable dec = (tStep < 1) ? min(6, ceil(-log(tStep) - 1e-9)) : 0
+	Variable tickGap = max(1, 0.06 * ns)		// 文字の高さ (軸の長さの約 6 %) ぶん
+
+	AXRD_AddYTick(tp, tl, 1, sy[0], dec, tickGap)
+	AXRD_AddYTick(tp, tl, ns, sy[ns - 1], dec, tickGap)
+	AXRD_AddYTick(tp, tl, jMax + 1, sy[jMax], dec, tickGap)
+	AXRD_AddYTick(tp, tl, jMin + 1, sy[jMin], dec, tickGap)
+
+	Variable a, b, k1, k2, kk, v
+	for (j = 0; j < ns - 1; j += 1)
+		a = sy[j]
+		b = sy[j + 1]
+		if (a == b)
+			continue
+		endif
+		k1 = ceil(min(a, b) / tStep - 1e-9)
+		k2 = floor(max(a, b) / tStep + 1e-9)
+		for (kk = k1; kk <= k2; kk += 1)
+			v = (b > a) ? kk * tStep : (k1 + k2 - kk) * tStep		// 位置が増える順にたどる
+			AXRD_AddYTick(tp, tl, j + 1 + (v - a) / (b - a), v, dec, tickGap)
+		endfor
+	endfor
+	Sort tp, tp, tl
+	return numpnts(tp)
+End
+
+// ----------------------------------------------------------------------------
+//  温度ログ: XRD のファイル名と、その測定中の平均温度の対応表
+// ----------------------------------------------------------------------------
+
+// ログのファイル名欄 → 照合用のキー (フォルダと拡張子 .txt を外す)
+Function/S AXRD_TLogKey(name)
+	String name
+	name = TrimString(name)
+	Variable i = max(strsearch(name, "\\", inf, 1), strsearch(name, "/", inf, 1))
+	if (i >= 0)
+		name = name[i + 1, inf]
+	endif
+	if (StringMatch(name, "*.txt"))
+		name = name[0, strlen(name) - 5]
+	endif
+	return name
+End
+
+// 温度ログを読み込む。"#" で始まる行は読み飛ばし、
+// 「ファイル名 <タブまたはカンマ> 温度」の行だけを拾う。拾えた行数を返す (開けなければ -1)。
+// 1 行も拾えなければ、読み込み済みのログはそのまま残す。
+Function AXRD_LoadTLog(fullPath)
+	String fullPath
+	DFREF df = AXRD_ToolDF("Map")
+	Variable refNum
+	Open/R/Z refNum as fullPath
+	if (V_flag != 0)
+		return -1
+	endif
+	Make/FREE/T/N=256 keyW
+	Make/FREE/D/N=256 tempW
+	String lineStr, keyStr
+	Variable n = 0, i, val
+	do
+		FReadLine refNum, lineStr
+		if (strlen(lineStr) == 0)
+			break		// end of file
+		endif
+		lineStr = ReplaceString("\r", lineStr, "")
+		lineStr = ReplaceString("\n", lineStr, "")
+		if (strlen(lineStr) == 0 || CmpStr(lineStr[0], "#") == 0)
+			continue
+		endif
+		i = strsearch(lineStr, "\t", inf, 1)
+		if (i < 0)
+			i = strsearch(lineStr, ",", inf, 1)
+		endif
+		if (i <= 0)
+			continue
+		endif
+		val = str2num(lineStr[i + 1, inf])
+		keyStr = AXRD_TLogKey(lineStr[0, i - 1])
+		if (numtype(val) != 0 || strlen(keyStr) == 0)
+			continue
+		endif
+		if (n >= numpnts(keyW))
+			Redimension/N=(2 * n) keyW, tempW
+		endif
+		keyW[n] = keyStr
+		tempW[n] = val
+		n += 1
+	while (1)
+	Close refNum
+	if (n == 0)
+		return 0
+	endif
+	Redimension/N=(n) keyW, tempW
+	Duplicate/O keyW, df:tLogName
+	Duplicate/O tempW, df:tLogT
+	return n
+End
+
+// 読み込み済みの温度ログから、現在のマップの各スキャンの温度 (T_file) を引く。
+// ファイル名 (拡張子なし) が一致した行を使う。見つからないスキャンは NaN。見つかった数を返す。
+Function AXRD_MapFillTFile()
+	DFREF df = AXRD_ToolDF("Map")
+	DFREF mapDF = $kAXRD_MapDF
+	SVAR gTFileDisp = df:gTFileDisp
+	Wave/Z/T tLogName = df:tLogName
+	Wave/Z tLogT = df:tLogT
+	Wave/Z/T scanLabel = mapDF:scanLabel
+	Variable nLog = 0
+	if (WaveExists(tLogName) && WaveExists(tLogT))
+		nLog = min(numpnts(tLogName), numpnts(tLogT))
+	endif
+	if (nLog == 0)
+		gTFileDisp = "(no temperature file)"
+	else
+		sprintf gTFileDisp, "%d temperatures loaded", nLog
+	endif
+	if (!WaveExists(scanLabel))
+		return 0
+	endif
+
+	Variable ns = numpnts(scanLabel), j, found = 0
+	Make/O/D/N=(ns) mapDF:T_file = NaN
+	Wave T_file = mapDF:T_file
+	if (nLog == 0)
+		return 0
+	endif
+	String keyStr
+	for (j = 0; j < ns; j += 1)
+		keyStr = scanLabel[j]
+		FindValue/TEXT=keyStr/TXOP=4 tLogName
+		if (V_value >= 0 && V_value < nLog)
+			T_file[j] = tLogT[V_value]
+			found += 1
+		endif
+	endfor
+	sprintf gTFileDisp, "%d of %d scans matched", found, ns
+	return found
+End
+
+// 温度ログを選んで読み込み、Y 軸を "Temperature (file)" に切り替える
+Function AXRD_MapLoadTFile()
+	DFREF df = AXRD_ToolDF("Map")
+	SVAR gStatus = df:gStatus
+	NVAR gYMode = df:gYMode
+	NVAR gTUnit = df:gTUnit
+	String pathName = AXRD_PathName("Map")
+	String pn = kAXRD_MGraph + "#ctrl"
+	String filters = "Text files (*.txt,*.csv,*.dat):.txt,.csv,.dat;All files:.*;"
+	String msg = "Select the temperature log (XRD file name and mean temperature)"
+	Variable refNum
+
+	PathInfo $pathName
+	if (V_flag)
+		Open/D/R/F=filters/M=msg/P=$pathName refNum
+	else
+		Open/D/R/F=filters/M=msg refNum
+	endif
+	String fullPath = S_fileName
+	if (strlen(fullPath) == 0)
+		return -1		// cancelled
+	endif
+
+	Variable n = AXRD_LoadTLog(fullPath)
+	if (n <= 0)
+		gStatus = "No temperatures found in that file."
+		return -1
+	endif
+	gYMode = 5
+	gTUnit = 2		// ログの温度は °C
+	PopupMenu popYMode, win=$pn, mode=5
+	PopupMenu popUnit, win=$pn, mode=2
+	sprintf gStatus, "T file: %d temperatures loaded.", n
+	AXRD_MapFillTFile()
+	AXRD_MapRefresh(1, 0)
+	return n
 End
 
 // 2θ 範囲 [x1, x2] (x2 <= x1 なら全域) に対応する行番号の範囲
@@ -1188,7 +1457,7 @@ Function AXRD_MapRefresh(applyAxes, createStack)
 	NVAR gX2 = df:gX2
 
 	String yLab = "", imgYLab = "", tagFmt = ""
-	AXRD_MapComputeY(yLab, imgYLab, tagFmt)
+	Variable mono = AXRD_MapComputeY(yLab, imgYLab, tagFmt)
 	Wave se = mapDF:scanYEdge
 
 	if (WhichListItem("xrdMap", ImageNameList(g, ";")) < 0)
@@ -1201,6 +1470,14 @@ Function AXRD_MapRefresh(applyAxes, createStack)
 	String yl = "\\Z16" + imgYLab
 	Label/W=$g bottom xl
 	Label/W=$g left yl
+	if (mono)
+		ModifyGraph/W=$g userticks(left)=0
+	else
+		// スキャン順の image に、Y の値 (温度など) の目盛りを付ける
+		Wave yTickPos = mapDF:yTickPos
+		Wave/T yTickLab = mapDF:yTickLab
+		ModifyGraph/W=$g userticks(left)={yTickPos, yTickLab}
+	endif
 
 	if (applyAxes)
 		if (gX2 > gX1)
@@ -1422,6 +1699,9 @@ Function AXRD_MButtonProc(ba) : ButtonControl
 			break
 		case "btnEditT":
 			AXRD_MapEditTable()
+			break
+		case "btnLoadT":
+			AXRD_MapLoadTFile()
 			break
 		case "btnFullX":
 			gX1 = 0
