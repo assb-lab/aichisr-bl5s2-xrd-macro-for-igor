@@ -1,0 +1,13 @@
+# 測定データ (機密)
+TXT/
+
+# Igor のエクスペリメント / ウェーブ (読み込んだ測定データを含む)
+*.pxp
+*.pxt
+*.uxp
+*.uxt
+*.ibw
+*.itx
+
+# macOS
+.DS_Store
